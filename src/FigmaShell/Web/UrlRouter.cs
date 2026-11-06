@@ -1,0 +1,112 @@
+using System.Diagnostics;
+
+namespace FigmaShell.Web;
+
+public enum RouteAction
+{
+    /// <summary>Open as a new tab inside FigmaShell.</summary>
+    InAppTab,
+    /// <summary>Let WebView2 open its default popup window (OAuth / sign-in flows that need window.opener).</summary>
+    Popup,
+    /// <summary>Hand off to the user's default browser.</summary>
+    External,
+    /// <summary>Drop silently (unknown / unsafe scheme).</summary>
+    Block,
+}
+
+/// <summary>Which part of figma.com a URL belongs to — decides which tab it should live in.</summary>
+public enum FigmaArea
+{
+    Other,
+    Home,
+    Community,
+    File,
+}
+
+public static class UrlRouter
+{
+    public const string HomeUrl = "https://www.figma.com/files";
+    public const string CommunityUrl = "https://www.figma.com/community";
+    /// <summary>Creates a new design draft (this is where figma.new redirects to).</summary>
+    public const string NewFileUrl = "https://www.figma.com/file/new";
+    public const string NewBoardUrl = "https://www.figma.com/board/new";
+    public const string NewSlidesUrl = "https://www.figma.com/slides/new";
+
+    private static readonly HashSet<string> FileRoots = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "file", "design", "board", "proto", "slides", "deck", "make", "site", "buzz",
+    };
+
+    public static FigmaArea Classify(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || !IsFigmaHost(u))
+            return FigmaArea.Other;
+
+        var first = u.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        if (first.Equals("files", StringComparison.OrdinalIgnoreCase)) return FigmaArea.Home;
+        if (first.Equals("community", StringComparison.OrdinalIgnoreCase)) return FigmaArea.Community;
+        if (FileRoots.Contains(first)) return FigmaArea.File;
+        return FigmaArea.Other;
+    }
+
+    private static readonly HashSet<string> AuthHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "accounts.google.com",
+        "appleid.apple.com",
+        "login.microsoftonline.com",
+        "login.live.com",
+    };
+
+    private static readonly string[] FigmaAuthPaths = ["/login", "/oauth", "/saml", "/sso", "/signup", "/logout"];
+
+    public static bool IsFigmaHost(Uri u) =>
+        u.Host.Equals("figma.com", StringComparison.OrdinalIgnoreCase) ||
+        u.Host.Equals("www.figma.com", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsFigmaUrl(string? s) =>
+        Uri.TryCreate(s, UriKind.Absolute, out var u) &&
+        (u.Scheme == Uri.UriSchemeHttps || u.Scheme == Uri.UriSchemeHttp) &&
+        IsFigmaHost(u);
+
+    /// <param name="uri">Target of window.open / target=_blank.</param>
+    /// <param name="hasPopupFeatures">True when the page asked for a sized/positioned window (typical for OAuth popups).</param>
+    public static RouteAction Route(string uri, bool hasPopupFeatures)
+    {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var u))
+            return RouteAction.Popup;
+
+        if (u.Scheme == "about")
+            return RouteAction.Popup; // about:blank popups get navigated by script afterwards
+
+        if (u.Scheme == "mailto")
+            return RouteAction.External;
+
+        if (u.Scheme != Uri.UriSchemeHttps && u.Scheme != Uri.UriSchemeHttp)
+            return RouteAction.Block;
+
+        if (IsFigmaHost(u))
+        {
+            var path = u.AbsolutePath;
+            if (hasPopupFeatures || FigmaAuthPaths.Any(p => path.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                return RouteAction.Popup;
+            return RouteAction.InAppTab;
+        }
+
+        if (hasPopupFeatures || AuthHosts.Contains(u.Host))
+            return RouteAction.Popup;
+
+        return RouteAction.External;
+    }
+
+    public static void OpenExternal(string uri)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+        }
+        catch
+        {
+            // No handler registered / user cancelled — nothing sensible to do.
+        }
+    }
+}
