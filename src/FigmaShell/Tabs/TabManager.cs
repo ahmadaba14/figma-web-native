@@ -293,6 +293,8 @@ public sealed class TabManager
         var core = webView.CoreWebView2;
         WebViewFactory.Configure(core);
         Wire(tab, core);
+        await ApplyFontAgentFixAsync(core);
+        if (!ReferenceEquals(tab.WebView, webView)) return;
 
         if (!ReferenceEquals(tab, Active))
             core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low;
@@ -301,8 +303,112 @@ public sealed class TabManager
         if (ReferenceEquals(tab, Active)) webView.Focus();
     }
 
+    // TEMP diagnostics (font agent): nav.log in the FigmaShell data folder
+    private static void Log(string msg)
+    {
+        try { File.AppendAllText(Path.Combine(WebViewFactory.DataRoot, "nav.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + Environment.NewLine); } catch { }
+    }
+
+    // Figma gates its font-agent connection on the "local network access" permission. A WebView2 host has no
+    // prompt UI, so Chromium leaves it at "prompt" forever and Figma reports the font installer as disconnected.
+    private static readonly string[] LocalNetPermissions = ["local-network-access", "local-network", "loopback-network"];
+
+    private const string PermissionShim = @"(()=>{try{
+const P=navigator.permissions;if(!P||!P.query)return;
+const q=P.query.bind(P);const names=new Set(['local-network-access','local-network','loopback-network']);
+const granted=n=>({name:n,state:'granted',onchange:null,addEventListener(){},removeEventListener(){},dispatchEvent(){return true}});
+P.query=function(d){if(d&&names.has(d.name)){return q(d).then(s=>s.state==='granted'?s:granted(d.name),()=>granted(d.name));}return q(d)};
+}catch(e){}})();";
+
+    private static async Task ApplyFontAgentFixAsync(CoreWebView2 core)
+    {
+        // 1) Grant the real permission for figma.com (covers workers and iframes too), if the browser allows it.
+        foreach (var name in LocalNetPermissions)
+        {
+            try
+            {
+                await core.CallDevToolsProtocolMethodAsync("Browser.setPermission",
+                    "{\"permission\":{\"name\":\"" + name + "\"},\"setting\":\"granted\",\"origin\":\"https://www.figma.com\"}");
+                Log("GRANT ok " + name);
+            }
+            catch (Exception ex) { Log("GRANT fail " + name + ": " + ex.Message); }
+        }
+        // 2) Fallback: make the page's own permission queries answer "granted".
+        try { await core.AddScriptToExecuteOnDocumentCreatedAsync(PermissionShim); Log("SHIM installed"); }
+        catch (Exception ex) { Log("SHIM fail: " + ex.Message); }
+    }
+
+    private const string ProbeScript = @"(async()=>{const r={};
+for(const n of ['local-network-access','local-network','loopback-network','geolocation']){try{r[n]=(await navigator.permissions.query({name:n})).state}catch(e){r[n]='ERR '+e.message}}
+try{r.agentFetch=(await (await fetch('http://127.0.0.1:44950/figma/version')).text())}catch(e){r.agentFetch='ERR '+e.message}
+try{const real=Object.getPrototypeOf(navigator.permissions).query;r.real={};for(const n of ['local-network-access','loopback-network']){try{r.real[n]=(await real.call(navigator.permissions,{name:n})).state}catch(e){r.real[n]='ERR'}}}catch(e){}r.secure=window.isSecureContext;r.ua=navigator.userAgent;return JSON.stringify(r)})()";
+
+    private static async void RunProbe(CoreWebView2 core)
+    {
+        try
+        {
+            await Task.Delay(4000);
+            var args = System.Text.Json.JsonSerializer.Serialize(new { expression = ProbeScript, awaitPromise = true, returnByValue = true });
+            var res = await core.CallDevToolsProtocolMethodAsync("Runtime.evaluate", args);
+            Log("PROBE " + core.Source + " " + res);
+        }
+        catch (Exception ex) { Log("PROBE-ERR " + ex.Message); }
+    }
+
+    private static bool IsLocal(string j) =>
+        j.Contains("\"url\":\"http://127.") || j.Contains("\"url\":\"http://localhost") ||
+        j.Contains("\"url\":\"https://localhost") || j.Contains("\"url\":\"https://127.") || j.Contains("[::1]") ||
+        j.Contains("\"documentURL\":\"http://127.") || j.Contains("\"documentURL\":\"http://localhost");
+
+    private static void TraceAgent(CoreWebView2 core)
+    {
+        _ = core.CallDevToolsProtocolMethodAsync("Network.enable", "{}");
+        _ = core.CallDevToolsProtocolMethodAsync("Log.enable", "{}");
+        // Also trace workers / iframes, where Figma's font-agent requests probably originate.
+        core.GetDevToolsProtocolEventReceiver("Target.attachedToTarget").DevToolsProtocolEventReceived += async (_, e) =>
+        {
+            string? sid = null;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(e.ParameterObjectAsJson);
+                sid = doc.RootElement.GetProperty("sessionId").GetString()!;
+                var info = doc.RootElement.GetProperty("targetInfo");
+                Log($"ATTACH {info.GetProperty("type").GetString()} {info.GetProperty("url").GetString()}");
+                await core.CallDevToolsProtocolMethodForSessionAsync(sid, "Network.enable", "{}");
+                await core.CallDevToolsProtocolMethodForSessionAsync(sid, "Log.enable", "{}");
+                await core.CallDevToolsProtocolMethodForSessionAsync(sid, "Runtime.enable", "{}");
+                await core.CallDevToolsProtocolMethodForSessionAsync(sid, "Runtime.runIfWaitingForDebugger", "{}");
+            }
+            catch (Exception ex)
+            {
+                Log("ATTACH-ERR " + ex.Message);
+                if (sid is not null) { try { await core.CallDevToolsProtocolMethodForSessionAsync(sid, "Runtime.runIfWaitingForDebugger", "{}"); } catch { } }
+            }
+        };
+        _ = core.CallDevToolsProtocolMethodAsync("Target.setAutoAttach",
+            "{\"autoAttach\":true,\"waitForDebuggerOnStart\":true,\"flatten\":true}");
+        core.GetDevToolsProtocolEventReceiver("Network.requestWillBeSent").DevToolsProtocolEventReceived += (_, e) =>
+        { if (IsLocal(e.ParameterObjectAsJson)) Log("REQ s=" + e.SessionId + " " + e.ParameterObjectAsJson[..Math.Min(1600, e.ParameterObjectAsJson.Length)]); };
+        core.GetDevToolsProtocolEventReceiver("Network.webSocketCreated").DevToolsProtocolEventReceived += (_, e) =>
+            Log("WS s=" + e.SessionId + " " + e.ParameterObjectAsJson);
+        _ = core.CallDevToolsProtocolMethodAsync("Runtime.enable", "{}");
+        core.GetDevToolsProtocolEventReceiver("Runtime.consoleAPICalled").DevToolsProtocolEventReceived += (_, e) =>
+        {
+            var j = e.ParameterObjectAsJson;
+            if (System.Text.RegularExpressions.Regex.IsMatch(j, "font|agent|installer|44950|local", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                Log("CONSOLE s=" + e.SessionId + " " + j[..Math.Min(600, j.Length)]);
+        };
+        core.GetDevToolsProtocolEventReceiver("Network.loadingFailed").DevToolsProtocolEventReceived += (_, e) =>
+            { if (!e.ParameterObjectAsJson.Contains("ERR_ABORTED") && !e.ParameterObjectAsJson.Contains("CACHE_MISS")) Log("FAIL s=" + e.SessionId + " " + e.ParameterObjectAsJson); };
+        core.GetDevToolsProtocolEventReceiver("Network.responseReceived").DevToolsProtocolEventReceived += (_, e) =>
+        { if (IsLocal(e.ParameterObjectAsJson)) Log("RESP s=" + e.SessionId + " " + e.ParameterObjectAsJson[..Math.Min(300, e.ParameterObjectAsJson.Length)]); };
+        core.GetDevToolsProtocolEventReceiver("Log.entryAdded").DevToolsProtocolEventReceived += (_, e) =>
+        { var j = e.ParameterObjectAsJson; if (IsLocal(j) || j.Contains("ocal") || j.Contains("rivate") || j.Contains("ont")) Log("LOG " + j[..Math.Min(500, j.Length)]); };
+    }
+
     private void Wire(TabItemModel tab, CoreWebView2 core)
     {
+        TraceAgent(core);
         core.DocumentTitleChanged += (_, _) => tab.Title = CleanTitle(core.DocumentTitle);
         core.NavigationStarting += (_, e) =>
         {
@@ -319,7 +425,7 @@ public sealed class TabManager
             tab.IsLoading = true;
         };
         core.SourceChanged += (_, _) => OnSourceChanged(tab, core);
-        core.NavigationCompleted += (_, _) => tab.IsLoading = false;
+        core.NavigationCompleted += (_, _) => { tab.IsLoading = false; if (!tab.IsPinned) RunProbe(core); };
         core.FaviconChanged += async (_, _) => tab.Favicon = await LoadFaviconAsync(core) ?? tab.Favicon;
         core.NewWindowRequested += (_, e) => OnNewWindowRequested(tab, e);
         core.WindowCloseRequested += (_, _) => Close(tab);
@@ -455,7 +561,7 @@ public sealed class TabManager
 
     private static void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
     {
-        System.Diagnostics.Debug.WriteLine($"[perm] {e.PermissionKind} ({(int)e.PermissionKind}) from {e.Uri}");
+        Log($"PERM {e.PermissionKind} ({(int)e.PermissionKind}) from {e.Uri}");
         if (!UrlRouter.IsFigmaOrigin(e.Uri)) return;
 
         switch (e.PermissionKind)
@@ -477,7 +583,7 @@ public sealed class TabManager
                 // Kinds newer than this SDK (e.g. Chromium's local-network-access prompt, which gates the
                 // Figma Agent font service on localhost:44950) arrive as unnamed enum values. Allow them
                 // for Figma origins so the font agent works in every editor, not only Design.
-                if (!Enum.IsDefined(e.PermissionKind))
+                if (e.PermissionKind == CoreWebView2PermissionKind.UnknownPermission || !Enum.IsDefined(e.PermissionKind))
                 {
                     e.State = CoreWebView2PermissionState.Allow;
                     e.SavesInProfile = true;

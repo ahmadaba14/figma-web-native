@@ -10,7 +10,13 @@ public static class WebViewFactory
 
     // Figma is a WebGL/WASM canvas app: make sure GPU raster is on regardless of blocklist heuristics
     // for rasterising DOM UI. (Everything else stays at Chromium defaults, which are already tuned.)
-    private const string BrowserArguments = "--enable-gpu-rasterization";
+    // The second flag lets figma.com reach the Figma Agent font service on localhost:44950. Chromium's
+    // Local Network Access check needs a permission prompt that a WebView2 host never shows, so the
+    // request is blocked silently and non-Design editors report "disconnected from the font installer".
+    private const string BrowserArguments =
+        "--enable-gpu-rasterization " +
+        "--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessSendPreflights," +
+        "PrivateNetworkAccessRespectPreflightResults,BlockInsecurePrivateNetworkRequests";
 
     /// <summary>
     /// One environment for the whole app: every tab shares one browser process, one GPU process and
