@@ -54,6 +54,12 @@ public sealed class TabItemModel(string url, TabKind kind = TabKind.File) : INot
     /// <summary>Null until the tab is first activated (lazy) or after it has been discarded.</summary>
     public WebView2? WebView { get; set; }
 
+    /// <summary>Pinned tabs: last URL that actually belonged in the tab (where the user was).</summary>
+    public string? LastGoodUrl { get; set; }
+    /// <summary>Pinned tabs: place to return to after a file navigation was bounced out, valid until RestoreUntil.</summary>
+    public string? RestoreTarget { get; set; }
+    public DateTime RestoreUntil { get; set; }
+
     public DateTime LastActive { get; set; } = DateTime.UtcNow;
 
     public event PropertyChangedEventHandler? PropertyChanged;

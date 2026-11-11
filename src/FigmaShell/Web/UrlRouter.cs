@@ -32,10 +32,33 @@ public static class UrlRouter
     public const string NewBoardUrl = "https://www.figma.com/board/new";
     public const string NewSlidesUrl = "https://www.figma.com/slides/new";
 
+    public const string NewMakeUrl = "https://www.figma.com/make/new";
+    public const string NewSpecUrl = "https://www.figma.com/spec/new";
+    public const string NewBuzzUrl = "https://www.figma.com/buzz/new";
+    public const string NewSiteUrl = "https://www.figma.com/site/new";
+
     private static readonly HashSet<string> FileRoots = new(StringComparer.OrdinalIgnoreCase)
     {
-        "file", "design", "board", "proto", "slides", "deck", "make", "site", "buzz",
+        "file", "design", "board", "proto", "slides", "deck", "make", "site", "buzz", "spec",
     };
+
+    /// <summary>File key of an editor URL (/design/KEY/name), or null for non-file and "/new" URLs.
+    /// /file/KEY redirects to /design/KEY, so the key is what identifies "the same file".</summary>
+    public static string? GetFileKey(string? url)
+    {
+        if (Classify(url) != FigmaArea.File) return null;
+        var segs = new Uri(url!).AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segs.Length < 2) return null;
+        // /proto/KEY and /make/KEY etc. all carry the key second; "new" is not a file.
+        return segs[1].Equals("new", StringComparison.OrdinalIgnoreCase) ? null : segs[1];
+    }
+
+    /// <summary>True for the bare /files or /community landing pages (no sub-path).</summary>
+    public static bool IsAreaRoot(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || !IsFigmaHost(u)) return false;
+        return u.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Length <= 1;
+    }
 
     public static FigmaArea Classify(string? url)
     {
@@ -62,6 +85,14 @@ public static class UrlRouter
     public static bool IsFigmaHost(Uri u) =>
         u.Host.Equals("figma.com", StringComparison.OrdinalIgnoreCase) ||
         u.Host.Equals("www.figma.com", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>figma.com or any subdomain — for permission grants only (editors may run in subdomain frames).
+    /// Deliberately separate from <see cref="IsFigmaHost"/>, which decides in-app vs external link routing.</summary>
+    public static bool IsFigmaOrigin(string? s) =>
+        Uri.TryCreate(s, UriKind.Absolute, out var u) &&
+        u.Scheme == Uri.UriSchemeHttps &&
+        (u.Host.Equals("figma.com", StringComparison.OrdinalIgnoreCase) ||
+         u.Host.EndsWith(".figma.com", StringComparison.OrdinalIgnoreCase));
 
     public static bool IsFigmaUrl(string? s) =>
         Uri.TryCreate(s, UriKind.Absolute, out var u) &&

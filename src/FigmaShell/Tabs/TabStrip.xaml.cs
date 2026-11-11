@@ -118,6 +118,10 @@ public partial class TabStrip : UserControl
     private void NewDesign_Click(object sender, RoutedEventArgs e) => _manager?.NewFile();
     private void NewBoard_Click(object sender, RoutedEventArgs e) => _manager?.NewBoard();
     private void NewSlides_Click(object sender, RoutedEventArgs e) => _manager?.NewSlides();
+    private void NewMake_Click(object sender, RoutedEventArgs e) => _manager?.NewMake();
+    private void NewSpec_Click(object sender, RoutedEventArgs e) => _manager?.NewSpec();
+    private void NewBuzz_Click(object sender, RoutedEventArgs e) => _manager?.NewBuzz();
+    private void NewSite_Click(object sender, RoutedEventArgs e) => _manager?.NewSite();
     private void OpenExisting_Click(object sender, RoutedEventArgs e) => _manager?.BrowseFiles();
 
     // Hand keyboard focus back to Figma when the menu closes (item picked or Esc).

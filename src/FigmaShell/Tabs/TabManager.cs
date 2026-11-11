@@ -71,17 +71,43 @@ public sealed class TabManager
             case FigmaArea.Community: return ShowPinned(Community, url, activate);
         }
 
+        // One click can reach us via window.open, NavigationStarting and a pushState SourceChanged.
+        // Collapse them: the same file key (or the same "new" URL within a moment) reuses the tab.
+        var key = UrlRouter.GetFileKey(url);
+        TabItemModel? existing = key is not null
+            ? FileTabs.FirstOrDefault(t => string.Equals(UrlRouter.GetFileKey(t.Url), key, StringComparison.Ordinal))
+            : (_lastOpened is not null && Tabs.Contains(_lastOpened) &&
+               string.Equals(_lastOpenedUrl, url, StringComparison.OrdinalIgnoreCase) &&
+               DateTime.UtcNow - _lastOpenedAt < TimeSpan.FromMilliseconds(1500))
+                ? _lastOpened : null;
+        if (existing is not null)
+        {
+            if (activate) Activate(existing);
+            return existing;
+        }
+
         var tab = new TabItemModel(url);
+        _lastOpened = tab;
+        _lastOpenedUrl = url;
+        _lastOpenedAt = DateTime.UtcNow;
         int i = Math.Clamp(index ?? Tabs.Count, PinnedCount, Tabs.Count);
         Tabs.Insert(i, tab);
         if (activate) Activate(tab);
         return tab;
     }
 
-    /// <summary>Create a new design file / FigJam board / Slides deck in a new tab.</summary>
+    private TabItemModel? _lastOpened;
+    private string? _lastOpenedUrl;
+    private DateTime _lastOpenedAt;
+
+    /// <summary>Create a new design file / FigJam board / Slides deck / etc. in a new tab.</summary>
     public TabItemModel NewFile() => Open(UrlRouter.NewFileUrl);
     public TabItemModel NewBoard() => Open(UrlRouter.NewBoardUrl);
     public TabItemModel NewSlides() => Open(UrlRouter.NewSlidesUrl);
+    public TabItemModel NewMake() => Open(UrlRouter.NewMakeUrl);
+    public TabItemModel NewSpec() => Open(UrlRouter.NewSpecUrl);
+    public TabItemModel NewBuzz() => Open(UrlRouter.NewBuzzUrl);
+    public TabItemModel NewSite() => Open(UrlRouter.NewSiteUrl);
 
     /// <summary>"Open existing file": browse in the Home tab; picked files open in their own tab.</summary>
     public void BrowseFiles() => Activate(Home);
@@ -101,12 +127,15 @@ public sealed class TabManager
     /// <summary>Bring up a pinned tab, navigating it to <paramref name="url"/> if it is elsewhere.</summary>
     private TabItemModel ShowPinned(TabItemModel pinned, string url, bool activate = true)
     {
+        // A bare /files or /community ("Back to files", logo click) must not wipe the page the user
+        // was on in that tab; only deep links navigate.
+        bool keepPlace = UrlRouter.IsAreaRoot(url);
         if (pinned.WebView?.CoreWebView2 is { } core)
         {
-            if (!string.Equals(core.Source, url, StringComparison.OrdinalIgnoreCase))
+            if (!keepPlace && !string.Equals(core.Source, url, StringComparison.OrdinalIgnoreCase))
                 core.Navigate(url);
         }
-        else
+        else if (!keepPlace || UrlRouter.IsAreaRoot(pinned.Url))
         {
             pinned.Url = url; // lazy: loaded on first activation
         }
@@ -350,7 +379,25 @@ public sealed class TabManager
             FigmaArea.Community => tab.Kind != TabKind.Community,
             _ => false,
         };
-        if (!misplaced) return;
+        if (!misplaced)
+        {
+            if (tab.IsPinned)
+            {
+                // After bouncing a file out, GoBack can land on the root instead of the folder the user
+                // was in. If so, send the tab to the remembered place.
+                var target = tab.RestoreTarget;
+                tab.RestoreTarget = null;
+                if (target is not null && DateTime.UtcNow < tab.RestoreUntil &&
+                    UrlRouter.IsAreaRoot(url) && !UrlRouter.IsAreaRoot(target) &&
+                    !string.Equals(url, target, StringComparison.OrdinalIgnoreCase))
+                {
+                    _host.Dispatcher.BeginInvoke(() => { if (Tabs.Contains(tab)) core.Navigate(target); });
+                    return;
+                }
+                tab.LastGoodUrl = url;
+            }
+            return;
+        }
 
         // Defer: don't navigate/dispose a WebView from inside its own event.
         _host.Dispatcher.BeginInvoke(() =>
@@ -361,8 +408,11 @@ public sealed class TabManager
             if (tab.IsPinned)
             {
                 // Put the pinned tab back where it was.
+                var home = tab.Kind == TabKind.Home ? UrlRouter.HomeUrl : UrlRouter.CommunityUrl;
+                tab.RestoreTarget = tab.LastGoodUrl;
+                tab.RestoreUntil = DateTime.UtcNow.AddSeconds(5);
                 if (core.CanGoBack) core.GoBack();
-                else core.Navigate(tab.Kind == TabKind.Home ? UrlRouter.HomeUrl : UrlRouter.CommunityUrl);
+                else core.Navigate(tab.LastGoodUrl ?? home);
             }
             else
             {
@@ -405,7 +455,8 @@ public sealed class TabManager
 
     private static void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
     {
-        if (!UrlRouter.IsFigmaUrl(e.Uri)) return;
+        System.Diagnostics.Debug.WriteLine($"[perm] {e.PermissionKind} ({(int)e.PermissionKind}) from {e.Uri}");
+        if (!UrlRouter.IsFigmaOrigin(e.Uri)) return;
 
         switch (e.PermissionKind)
         {
@@ -415,6 +466,22 @@ public sealed class TabManager
             case CoreWebView2PermissionKind.PersistentStorage:
                 e.State = CoreWebView2PermissionState.Allow;
                 e.SavesInProfile = true;
+                break;
+
+            case CoreWebView2PermissionKind.Camera:
+            case CoreWebView2PermissionKind.Microphone:
+            case CoreWebView2PermissionKind.Geolocation:
+                break; // leave to WebView2's default prompt
+
+            default:
+                // Kinds newer than this SDK (e.g. Chromium's local-network-access prompt, which gates the
+                // Figma Agent font service on localhost:44950) arrive as unnamed enum values. Allow them
+                // for Figma origins so the font agent works in every editor, not only Design.
+                if (!Enum.IsDefined(e.PermissionKind))
+                {
+                    e.State = CoreWebView2PermissionState.Allow;
+                    e.SavesInProfile = true;
+                }
                 break;
         }
     }

@@ -35,7 +35,7 @@ Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSo
 |---|---|
 | Ctrl+T | Go to Home tab |
 | Ctrl+N | New design file (new tab) |
-| "+" button | Menu: new design file / FigJam board / Slides deck, or open an existing file (goes to Home) |
+| "+" button | Menu: new design / FigJam / Slides / Make / Spec / Buzz / Site, or open an existing file (goes to Home) |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab |
 | Ctrl+Shift+T | Reopen closed tab |
 | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous tab |

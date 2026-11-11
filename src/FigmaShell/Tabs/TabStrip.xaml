@@ -7,6 +7,10 @@
             <MenuItem Header="New design file" Tag="&#xE790;" InputGestureText="Ctrl+N" Click="NewDesign_Click" />
             <MenuItem Header="New FigJam board" Tag="&#xE70B;" Click="NewBoard_Click" />
             <MenuItem Header="New Slides deck" Tag="&#xE786;" Click="NewSlides_Click" />
+            <MenuItem Header="New Make file" Tag="&#xE713;" Click="NewMake_Click" />
+            <MenuItem Header="New Spec" Tag="&#xE8A5;" Click="NewSpec_Click" />
+            <MenuItem Header="New Buzz asset" Tag="&#xE8B9;" Click="NewBuzz_Click" />
+            <MenuItem Header="New Site" Tag="&#xE774;" Click="NewSite_Click" />
             <Separator Style="{StaticResource MenuSeparator}" />
             <MenuItem Header="Open existing file…" Tag="&#xE838;" InputGestureText="Ctrl+T" Click="OpenExisting_Click" />
         </ContextMenu>
